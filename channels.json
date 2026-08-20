@@ -1,0 +1,6 @@
+{
+  "tvbs": { "title": "TVBS NEWS 24hr", "youtube_url": "https://www.youtube.com/watch?v=m_dhMSvUCIc", "format": "96" },
+  "ttv":  { "title": "台視新聞 HD (TTV News)", "youtube_url": "https://www.youtube.com/watch?v=9iRAqBMakXY", "format": "96" },
+  "ebc":  { "title": "東森新聞 51台 (EBC News)", "youtube_url": "https://www.youtube.com/watch?v=V1p33hqPrUk", "format": "96" },
+  "cti":  { "title": "中天新聞 (CTI News)", "youtube_url": "https://www.youtube.com/watch?v=vr3XyVCR4T0", "format": "96" }
+}
