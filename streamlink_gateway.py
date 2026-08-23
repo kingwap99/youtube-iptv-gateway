@@ -35,6 +35,7 @@ HLS_LIST_SIZE = 6       # keep ~24s of live buffer
 # streamlink 連續緩衝參數（與 TVHeadend 裡實證穩定的設定一致）
 LIVE_EDGE = 6
 RINGBUFFER = "32M"
+STREAM = os.environ.get("SL_STREAM", "1080p,best")   # 畫質切換: 1080p,best / 720p,best
 
 
 def log(msg):
@@ -58,7 +59,7 @@ class Channel:
             shlex.quote(STREAMLINK) + " --stdout"
             " --hls-live-edge %d" % LIVE_EDGE +
             " --ringbuffer-size %s" % RINGBUFFER +
-            " -4 --default-stream 720p,best --url " + shlex.quote(self.youtube_url) +
+            " -4 --default-stream " + STREAM + " --url " + shlex.quote(self.youtube_url) +
             " | " + shlex.quote(FFMPEG) +
             " -hide_banner -loglevel error"
             " -fflags +genpts -f mpegts -i pipe:0"
