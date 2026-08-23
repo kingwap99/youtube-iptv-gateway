@@ -1,130 +1,120 @@
-# YouTube Live → IPTV Gateway
+# YouTube Live → IPTV HLS Gateway (streamlink)
 
-On-demand HTTP gateway that turns YouTube Live (or any HLS live) into an IPTV
-stream for internal use. Nothing runs until someone actually watches: a client
-request resolves the YouTube URL via `yt-dlp` and byte-for-byte proxies the HLS
-— **no transcode, no remux, no FFmpeg, ~0 CPU** while idle or streaming.
+把 YouTube 直播（或任何 HLS 直播）轉成內部 IPTV 串流的 on-demand gateway，供牆上播放器 /
+電視盒 / VLC / Kodi 使用。
 
-Multiple clients share a single upstream connection (segments are fetched once
-and cached per channel).
+跟「逐段 proxy」的舊做法不同，這版用 **streamlink 連續緩衝拉流**（`--hls-live-edge 6`
++ 32MB ring buffer），把 YouTube 每 ~30 秒的 URL 輪替在內部吸收掉，再 `ffmpeg -c copy`
+（零重編碼）切成 HLS。AVPlayer 直接可播，不會因為 URL 輪替卡頓。
 
-## Features
+## 為什麼用 streamlink，不用 yt-dlp 逐段 proxy
 
-- ⚡ On-demand: zero processes when nobody is watching; auto-stop after 60s idle
-- 🔗 Byte-for-byte HLS proxy — H.264/AAC passthrough, no decoding/re-encoding
-- 👥 Multi-client: N viewers = 1 upstream fetch, shared segment cache (64MB)
-- 🔄 Handles YouTube live URL rotation (~30s) with proactive warm re-resolve +
-  403 auto-invalidation — no mid-stream freezes
-- 🌐 Built-in web player (`/player`) — watch from any browser
-- 📋 IPTV playlist endpoint (`/iptv.m3u`) for VLC / Kodi / IPTV apps
-- 📦 Stdlib-only Python — zero dependencies (runs on system `python3`)
+YouTube 直播的 segment URL **每 ~30 秒輪替一次**。舊做法是「牆上要一段 → gateway 才去
+YouTube 抓一段」：輪替瞬間舊 URL 變 403，得 invalidate + 重解析 → 出現空窗 → 卡頓。
 
-## Architecture
+streamlink 的做法是**持續讀取 + 大緩衝**：自己維持連線、持續抓 segment 放進 ring buffer，
+URL 輪替由它內部處理，外面看起來就是一條不斷流的連續 TS。這才是直播穩定的關鍵。
+
+## 架構
 
 ```
-IPTV player / browser
+IPTV player / wall player
         │  GET /live/<channel>.m3u8
         ▼
-┌─────────────────────────────────────────────┐
-│ gateway.py (stdlib asyncio-free http server) │
-│  有人看 → yt-dlp 解析 URL → HLS byte proxy    │
-│  多人看 → 共用同一條 upstream（segment 快取） │
-│  60s 沒人 → 停 upstream，回待機              │
-└─────────────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│ streamlink_gateway.py (stdlib http server)    │
+│  有人看 → spawn streamlink(720p 連續緩衝)      │
+│           │ ffmpeg -c copy → HLS segment      │
+│  120s 沒人 → 停掉 upstream，回待機             │
+└──────────────────────────────────────────────┘
 ```
 
-Endpoints:
+## 功能
 
-| Path | Description |
+- ⚡ On-demand：沒人看就 idle（零 process）；120s 沒人自動停
+- 🔁 streamlink 連續緩衝 → 對抗 YouTube URL 輪替，不斷流
+- 📦 ffmpeg `-c copy` 零重編碼，CPU ≈ 0%
+- 📋 `/iptv.m3u` 播放清單，餵給 VLC / Kodi / IPTV app / AVPlayer
+- 🎚️ `SL_STREAM` 環境變數切換 720p / 1080p
+- 🐍 stdlib-only Python（跑在系統 python3）
+
+## Endpoints
+
+| Path | 說明 |
 |---|---|
-| `/` | Channel index |
-| `/iptv.m3u` | IPTV playlist (feed to VLC/Kodi/IPTV apps) |
-| `/player` | Web player (hls.js) |
-| `/live/<ch>.m3u8` | Proxied live HLS manifest |
-| `/live/<ch>/seg?u=...` | Proxied segment (rewritten from upstream) |
-| `/healthz` | Liveness |
+| `/` | 頻道清單 |
+| `/iptv.m3u` | IPTV 播放清單（餵給播放器）|
+| `/live/<ch>.m3u8` | HLS manifest（on-demand spawn）|
+| `/live/<ch>/<seg>` | HLS segment (.ts) |
+| `/healthz` | liveness |
 
-## Install
+## 安裝
 
-Requires macOS/Linux with `python3` (≥3.8) and [yt-dlp](https://github.com/yt-dlp/yt-dlp).
+macOS / Linux，需要 `python3`（≥3.8）、[streamlink](https://github.com/streamlink/streamlink)、ffmpeg：
 
 ```bash
-brew install yt-dlp          # macOS; or pipx/pip install yt-dlp elsewhere
+brew install streamlink ffmpeg      # macOS
 git clone <this-repo> ~/iptv-gateway
 cd ~/iptv-gateway
-python3 gateway.py           # listens on 0.0.0.0:8080
+python3 streamlink_gateway.py       # 監聽 0.0.0.0:8081
 ```
 
-### Channels config (`channels.json`)
+### 頻道設定（channels.json）
 
 ```json
 {
-  "news": {
-    "title": "My News 24h",
-    "youtube_url": "https://www.youtube.com/watch?v=XXXXXXXXXXX",
-    "format": "96"
+  "tvbs": {
+    "title": "TVBS NEWS 24hr",
+    "youtube_url": "https://www.youtube.com/watch?v=XXXXXXXXXXX"
   }
 }
 ```
 
-- `format` = yt-dlp format id. Pick **H.264 (avc1)** formats so byte-proxy works
-  without transcoding: `96` = 1080p, `95` = 720p, `91–94` lower
-  (check with `yt-dlp -F <url>`). Never use vp9/av1 formats.
-- Editing `channels.json` takes effect after a restart; `/iptv.m3u` and
-  `/player` are generated from it on every request.
+每台只要給 YouTube 直播網址即可；舊 proxy 的 `format` 欄位已不需要。改完重啟生效。
 
-### macOS launchd (auto-start)
+### 畫質切換
 
-See `examples/com.neo.iptv-gateway.plist` — copy to
-`~/Library/LaunchAgents/`, adjust paths, then:
+`SL_STREAM` 環境變數，預設 `720p,best`（碼率低、最穩）。要 1080p 就設 `1080p,best`。
+注意 1080p 碼率會隨畫面內容浮動（0.9–5.6 Mbps），高動態畫面可能超出低階播放器的解碼能力。
+
+### macOS launchd（開機自啟）
+
+見 `examples/com.neo.iptv-streamlink.plist` — 複製到 `~/Library/LaunchAgents/`、把路徑改成
+你自己的後：
 
 ```bash
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.neo.iptv-gateway.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.neo.iptv-streamlink.plist
 ```
 
-Logs: `/tmp/iptv-gateway.log` (stdout), `/tmp/iptv-gateway.err.log` (stderr).
+Log：`/tmp/streamlink-gateway.log`（stdout）、`/tmp/streamlink-gateway.err.log`（stderr）。
 
-## How YouTube live URL rotation works (the important part)
+## 環境變數
 
-YouTube live segment URLs **rotate every ~30 seconds**. A naive proxy that holds
-the `yt-dlp -g` URL will hit 403 storms and freeze every ~30s. This gateway:
-
-1. **Warm re-resolve**: while a channel is active, a background thread
-   re-resolves the URL every 15s (`IPTV_WARM_INTERVAL`), so the manifest is
-   always fetched from a URL ≤15s old. Verified: 4-min playback = 0×403, 0×502,
-   zero dropped frames.
-2. **Reactive backstop**: on any segment/manifest HTTP 403, the upstream is
-   invalidated and re-resolved on the next request.
-
-## Environment variables
-
-| Var | Default | Meaning |
+| Var | 預設 | 說明 |
 |---|---|---|
-| `IPTV_PORT` | `8080` | Listen port |
-| `IPTV_IDLE_TIMEOUT` | `60` | Seconds without clients before dropping upstream |
-| `IPTV_URL_TTL` | `30` | Max age of a resolved YouTube URL |
-| `IPTV_WARM_INTERVAL` | `15` | Proactive re-resolve interval while active |
-| `IPTV_YTDLP` | `/opt/homebrew/bin/yt-dlp` | Path to yt-dlp binary |
+| `SL_PORT` | `8081` | 監聽 port |
+| `SL_STREAM` | `720p,best` | 畫質（`720p,best` / `1080p,best`）|
+| `SL_IDLE_TIMEOUT` | `120` | 幾秒沒人看就停 upstream |
+| `SL_STREAMLINK` | `/opt/homebrew/bin/streamlink` | streamlink 路徑 |
+| `SL_FFMPEG` | `/opt/homebrew/bin/ffmpeg` | ffmpeg 路徑 |
+| `SL_HLS_ROOT` | `/tmp/streamlink-hls` | HLS segment 暫存目錄 |
+| `SL_CHANNELS` | `./channels.json` | 頻道設定檔 |
 
-## Verify
+## 驗證
 
 ```bash
-# manifest is proxied (segment URIs rewritten to local)
-curl -s http://127.0.0.1:8080/live/news.m3u8 | head -8
+# manifest 有 segment
+curl -s http://127.0.0.1:8081/live/tvbs.m3u8 | head -8
 
-# real playback through the gateway (expect exit 0)
-ffmpeg -v error -i http://127.0.0.1:8080/live/news.m3u8 -t 20 -f null -
+# 端到端實際播放（exit 0 = 可播）
+ffmpeg -v error -i http://127.0.0.1:8081/live/tvbs.m3u8 -t 20 -f null -
 ```
 
-## Notes
+## 注意
 
-- Internal/personal use only — don't expose publicly (YouTube ToS).
-- No ad-blocking: this is a faithful HLS proxy. If the upstream injects SSAI
-  ads into the manifest (check for `EXT-X-CUE-OUT`/`EXT-X-DATERANGE`), they
-  pass through. Most 24/7 news channels don't inject ads.
-- Latency ≈ YouTube native + manifest poll (~5–15s).
-- Web player pins `hls.js@1.5` — newer hls.js (1.6+) has an interstitials
-  controller that stalls on live DVR playlists.
+- 內部/個人使用，勿公開（YouTube ToS）。
+- 不做去廣告；絕大多數 24/7 新聞台不插廣告。
+- 延遲 ≈ YouTube 原生 + manifest 輪詢（~5–15s）。
 
 ## License
 

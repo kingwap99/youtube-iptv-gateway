@@ -3,21 +3,29 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.neo.iptv-gateway</string>
+    <string>com.neo.iptv-streamlink</string>
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/python3</string>
-        <string>/Users/juicymore/iptv-gateway/gateway.py</string>
+        <string>/path/to/iptv-gateway/streamlink_gateway.py</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/juicymore/iptv-gateway</string>
+    <string>/path/to/iptv-gateway</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <!-- 要 1080p 的話，取消下面註解並重啟 -->
+    <!--
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SL_STREAM</key>
+        <string>1080p,best</string>
+    </dict>
+    -->
     <key>StandardOutPath</key>
-    <string>/tmp/iptv-gateway.log</string>
+    <string>/tmp/streamlink-gateway.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/iptv-gateway.err.log</string>
+    <string>/tmp/streamlink-gateway.err.log</string>
 </dict>
 </plist>

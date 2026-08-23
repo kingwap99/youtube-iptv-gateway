@@ -2,5 +2,14 @@
   "tvbs": { "title": "TVBS NEWS 24hr", "youtube_url": "https://www.youtube.com/watch?v=m_dhMSvUCIc", "format": "96" },
   "ttv":  { "title": "台視新聞 HD (TTV News)", "youtube_url": "https://www.youtube.com/watch?v=9iRAqBMakXY", "format": "96" },
   "ebc":  { "title": "東森新聞 51台 (EBC News)", "youtube_url": "https://www.youtube.com/watch?v=V1p33hqPrUk", "format": "96" },
-  "cti":  { "title": "中天新聞 (CTI News)", "youtube_url": "https://www.youtube.com/watch?v=vr3XyVCR4T0", "format": "96" }
+  "cti":  { "title": "中天新聞 (CTI News)", "youtube_url": "https://www.youtube.com/watch?v=vr3XyVCR4T0", "format": "96" },
+  "ctv":  { "title": "中視新聞 (CTV News)", "youtube_url": "https://www.youtube.com/watch?v=TCnaIE_SAtM", "format": "96" },
+  "cts":  { "title": "華視新聞 CH52 (CTS News)", "youtube_url": "https://www.youtube.com/watch?v=wM0g8EoUZ_E", "format": "96" },
+  "gtv":  { "title": "寰宇新聞 (GlobalNewsTV)", "youtube_url": "https://www.youtube.com/watch?v=LqIMxdJiztU", "format": "96" },
+  "pts":  { "title": "公視新聞 (PTS News)", "youtube_url": "https://www.youtube.com/watch?v=quwqlazU-c8", "format": "96" },
+  "ebcfin":  { "title": "東森財經新聞 (EBC Financial)", "youtube_url": "https://www.youtube.com/watch?v=1I2iq41Akmo", "format": "96" },
+  "tvbsmoney":  { "title": "TVBS財經 (TVBS Money)", "youtube_url": "https://www.youtube.com/watch?v=0an9taQ7OYM", "format": "96" },
+  "ustv":  { "title": "非凡新聞 (USTV)", "youtube_url": "https://www.youtube.com/watch?v=eA6Aczd3FZM", "format": "96" },
+  "bloomberg":  { "title": "Bloomberg TV", "youtube_url": "https://www.youtube.com/watch?v=QB5BNdBFujE", "format": "96" },
+  "cnn":  { "title": "CNN", "youtube_url": "https://www.youtube.com/watch?v=GotlA1KKWoo", "format": "96" }
 }
