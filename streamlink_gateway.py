@@ -35,7 +35,7 @@ HLS_LIST_SIZE = 6       # keep ~24s of live buffer
 # streamlink 連續緩衝參數（與 TVHeadend 裡實證穩定的設定一致）
 LIVE_EDGE = 6
 RINGBUFFER = "32M"
-STREAM = os.environ.get("SL_STREAM", "1080p,best")   # 畫質切換: 1080p,best / 720p,best
+STREAM = os.environ.get("SL_STREAM", "720p,best")   # 畫質切換: 720p,best / 1080p,best
 
 
 def log(msg):
