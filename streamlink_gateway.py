@@ -12,10 +12,16 @@ Endpoints:
   GET /live/<ch>.m3u8      HLS manifest (spawn streamlink|ffmpeg on demand)
   GET /live/<ch>/<seg>     HLS segment (.ts)
   GET /healthz             liveness
+  GET /admin               WebUI: 新增/刪除頻道
+  POST /admin/add          add channel (form: name, title, youtube_url)
+  POST /admin/del          delete channel (form: name)
 """
+import html
 import json
 import os
+import re
 import shlex
+import shutil
 import signal
 import subprocess
 import time
@@ -38,6 +44,55 @@ RINGBUFFER = "32M"
 STREAM = os.environ.get("SL_STREAM", "720p,best")   # 畫質切換: 720p,best / 1080p,best
 
 
+ADMIN_HTML = """<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Streamlink Gateway 管理</title>
+<style>
+ body{font-family:system-ui,-apple-system,sans-serif;background:#101114;color:#eee;margin:0;padding:24px;max-width:960px}
+ h1{font-size:20px;margin:0 0 16px}
+ h2{font-size:16px;margin:24px 0 8px}
+ table{border-collapse:collapse;width:100%%;font-size:14px}
+ th,td{border:1px solid #333;padding:6px 10px;text-align:left}
+ th{background:#1c1e22}
+ td.url{font-family:ui-monospace,monospace;font-size:12px;word-break:break-all;max-width:420px}
+ input{background:#1c1e22;color:#eee;border:1px solid #444;border-radius:5px;padding:6px 8px;margin:0 8px 8px 0}
+ input[name=name]{min-width:180px}
+ input[name=title]{min-width:200px}
+ input[name=youtube_url]{min-width:340px}
+ button{background:#2d5c9e;border:none;color:#fff;padding:7px 14px;border-radius:5px;cursor:pointer}
+ button.del{background:#8b2f2f}
+ a.play{color:#7fb4f5}
+ .ok{color:#7bd88f;padding:6px 0}
+ .err{color:#f08a8a;padding:6px 0}
+ form.inline{display:inline}
+</style>
+</head>
+<body>
+<h1>Streamlink Gateway · 頻道管理</h1>
+%(msg)s
+<h2>新增頻道</h2>
+<form method="post" action="/admin/add">
+  <input name="name" placeholder="ID (a-z 0-9 - _)" required pattern="[A-Za-z0-9_-]{1,32}" maxlength="32">
+  <input name="title" placeholder="顯示名稱" required maxlength="64">
+  <input name="youtube_url" type="url" placeholder="https://www.youtube.com/watch?v=..." required size="50">
+  <button type="submit">新增頻道</button>
+</form>
+<h2>頻道清單（%(count)s 台）</h2>
+<table>
+<thead><tr><th>ID</th><th>名稱</th><th>YouTube URL</th><th></th><th></th></tr></thead>
+<tbody>
+%(rows)s
+</tbody>
+</table>
+<p><a href="/">← 頻道首頁</a> · <a href="/iptv.m3u">/iptv.m3u</a> · <a href="/healthz">healthz</a></p>
+</body>
+</html>
+"""
+
+
 def log(msg):
     print("[%s] %s" % (time.strftime("%H:%M:%S"), msg), flush=True)
 
@@ -47,6 +102,7 @@ class Channel:
         self.name = name
         self.title = title
         self.youtube_url = youtube_url
+        self.extra = {}
         self.dir = os.path.join(HLS_ROOT, name)
         self.proc = None
         self.last_req = 0.0
@@ -154,13 +210,17 @@ class Channel:
 def load_channels():
     with open(CHANNELS_FILE, "r", encoding="utf-8") as f:
         cfg = json.load(f)
-    chans = [Channel(name, c.get("title", name), c["youtube_url"])
-             for name, c in cfg.items()]
+    chans = []
+    for name, c in cfg.items():
+        ch = Channel(name, c.get("title", name), c["youtube_url"])
+        ch.extra = {k: v for k, v in c.items() if k not in ("title", "youtube_url")}
+        chans.append(ch)
     return chans
 
 
 class Bridge:
     def __init__(self):
+        self.lock = Lock()
         self.channels = {c.name: c for c in load_channels()}
         log("loaded %d YouTube channels" % len(self.channels))
         Thread(target=self._reaper, daemon=True).start()
@@ -170,6 +230,40 @@ class Bridge:
             time.sleep(15)
             for ch in self.channels.values():
                 ch.reap()
+
+    def _save(self):
+        cfg = {}
+        for name, c in self.channels.items():
+            entry = {"title": c.title, "youtube_url": c.youtube_url}
+            entry.update(c.extra)
+            cfg[name] = entry
+        tmp = CHANNELS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(tmp, CHANNELS_FILE)
+
+    def add_channel(self, name, title, url):
+        with self.lock:
+            if name in self.channels:
+                return False, "exists"
+            self.channels[name] = Channel(name, title, url)
+            self._save()
+        log("admin: added channel %s (%s)" % (name, title))
+        return True, ""
+
+    def remove_channel(self, name):
+        with self.lock:
+            ch = self.channels.pop(name, None)
+            if ch is None:
+                return False
+            self._save()
+        with ch.lock:
+            ch._kill_locked()
+        if os.path.isdir(ch.dir):
+            shutil.rmtree(ch.dir, ignore_errors=True)
+        log("admin: removed channel %s" % name)
+        return True
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -190,6 +284,35 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_redirect(self, location):
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _admin_page(self):
+        br = self.server.bridge
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        msg = ""
+        if q.get("ok"):
+            msg = '<div class="ok">完成: %s</div>' % html.escape(q["ok"][0])
+        elif q.get("err"):
+            msg = '<div class="err">失敗: %s</div>' % html.escape(q["err"][0])
+        rows = []
+        for c in sorted(br.channels.values(), key=lambda c: c.name):
+            rows.append(
+                "<tr><td>%s</td><td>%s</td><td class='url'>%s</td>"
+                "<td><a class='play' href='/live/%s.m3u8' target='_blank'>播放</a></td>"
+                "<td><form class='inline' method='post' action='/admin/del' "
+                "onsubmit=\"return confirm('確定刪除 %s ?')\">"
+                "<input type='hidden' name='name' value='%s'>"
+                "<button type='submit' class='del'>刪除</button></form></td></tr>"
+                % (html.escape(c.name), html.escape(c.title),
+                   html.escape(c.youtube_url), html.escape(c.name),
+                   html.escape(c.title), html.escape(c.name)))
+        return ADMIN_HTML % {"msg": msg, "count": len(br.channels),
+                             "rows": "\n".join(rows)}
+
     def do_GET(self):
         br = self.server.bridge
         parsed = urllib.parse.urlparse(self.path)
@@ -203,7 +326,8 @@ class Handler(BaseHTTPRequestHandler):
                 '<li><a href="/live/%s.m3u8">%s</a> <code>/live/%s.m3u8</code></li>'
                 % (c.name, c.title, c.name) for c in br.channels.values())
             body = ("<h1>Streamlink Gateway</h1><ul>%s</ul>"
-                    '<p>Playlist: <a href="/iptv.m3u">/iptv.m3u</a></p>' % rows).encode()
+                    '<p>Playlist: <a href="/iptv.m3u">/iptv.m3u</a> · '
+                    '<a href="/admin">管理頻道</a></p>' % rows).encode()
             self._send(200, body, "text/html; charset=utf-8")
             return
         if path == "/iptv.m3u":
@@ -213,6 +337,10 @@ class Handler(BaseHTTPRequestHandler):
                 lines.append('#EXTINF:-1 tvg-id="%s" tvg-name="%s",%s' % (c.name, c.title, c.title))
                 lines.append("http://%s/live/%s.m3u8" % (host, c.name))
             self._send(200, ("\n".join(lines) + "\n").encode(), "application/x-mpegurl")
+            return
+        if path == "/admin":
+            body = self._admin_page().encode()
+            self._send(200, body, "text/html; charset=utf-8")
             return
         parts = path.strip("/").split("/")
         if len(parts) >= 2 and parts[0] == "live":
@@ -239,6 +367,45 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, data, "video/mp2t", {"Accept-Ranges": "bytes"})
                 return
         self._send(404, b"not found\n", "text/plain")
+
+    def do_POST(self):
+        br = self.server.bridge
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path not in ("/admin/add", "/admin/del"):
+            self._send(404, b"not found\n", "text/plain")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            length = 0
+        if 0 < length <= 1 << 20:
+            raw = self.rfile.read(length).decode("utf-8", "replace")
+        else:
+            raw = ""
+        form = urllib.parse.parse_qs(raw, keep_blank_values=True)
+
+        def val(k):
+            v = form.get(k)
+            return v[0].strip() if v else ""
+
+        if parsed.path == "/admin/add":
+            name = val("name")
+            title = val("title") or name
+            url = val("youtube_url")
+            if not re.match(r"^[A-Za-z0-9_-]{1,32}$", name):
+                self._send_redirect("/admin?err=invalid+name")
+                return
+            if not url.startswith(("http://", "https://")):
+                self._send_redirect("/admin?err=invalid+url")
+                return
+            ok, _ = br.add_channel(name, title, url)
+            self._send_redirect("/admin?ok=added" if ok else "/admin?err=exists")
+            return
+        if parsed.path == "/admin/del":
+            name = val("name")
+            ok = br.remove_channel(name)
+            self._send_redirect("/admin?ok=deleted" if ok else "/admin?err=notfound")
+            return
 
 
 class QuietServer(ThreadingHTTPServer):
