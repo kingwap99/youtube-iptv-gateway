@@ -36,6 +36,7 @@ IPTV player / wall player
 - 📦 ffmpeg `-c copy` 零重編碼，CPU ≈ 0%
 - 📋 `/iptv.m3u` 播放清單，餵給 VLC / Kodi / IPTV app / AVPlayer
 - 🎚️ `SL_STREAM` 環境變數切換 720p / 1080p
+- 🛠️ 內建 `/admin` WebUI：新增/刪除頻道，即時生效免重啟
 - 🐍 stdlib-only Python（跑在系統 python3）
 
 ## Endpoints
@@ -47,6 +48,22 @@ IPTV player / wall player
 | `/live/<ch>.m3u8` | HLS manifest（on-demand spawn）|
 | `/live/<ch>/<seg>` | HLS segment (.ts) |
 | `/healthz` | liveness |
+| `/admin` | WebUI：頻道管理（新增/刪除）|
+| `POST /admin/add` | 新增頻道 (form: `name`, `title`, `youtube_url`) |
+| `POST /admin/del` | 刪除頻道 (form: `name`) |
+
+## WebUI：頻道管理（/admin）
+
+內建管理頁面（首頁有「管理頻道」連結），新增或刪除頻道**即時生效**，不用重啟 gateway。
+
+- **新增**：填 ID、顯示名稱、YouTube 直播網址。ID 限 `a-z 0-9 - _`、1–32 字元；
+  URL 限 http(s)；ID 重複會擋。原本的額外欄位（例如舊版的 `format`）會保留，不會被弄丟。
+- **刪除**：會 kill 該頻道的 streamlink/ffmpeg 管線、清除該頻道的 HLS 暫存目錄，再更新設定檔。
+- 每次變更都以原子寫入（tmp + rename）同步 `channels.json`，runtime 與設定檔一致，立即生效；
+  但**正在播放中的其他頻道不受影響**。
+
+> ⚠️ `/admin` 沒有身分驗證，任何連得到 8081 的人都能改頻道。這隻 gateway 僅供內部/個人
+> 網路使用，請勿暴露到公網。
 
 ## 安裝
 
