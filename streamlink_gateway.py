@@ -15,6 +15,8 @@ Endpoints:
   GET /admin               WebUI: 新增/刪除頻道
   POST /admin/add          add channel (form: name, title, youtube_url)
   POST /admin/del          delete channel (form: name)
+  POST /admin/restart      restart one channel pipeline (form: name)
+  POST /admin/restart-gateway   restart whole gateway service
 """
 import html
 import json
@@ -63,6 +65,7 @@ ADMIN_HTML = """<!DOCTYPE html>
  input[name=title]{min-width:200px}
  input[name=youtube_url]{min-width:340px}
  button{background:#2d5c9e;border:none;color:#fff;padding:7px 14px;border-radius:5px;cursor:pointer}
+ button.warn{background:#8b6f2f}
  button.del{background:#8b2f2f}
  a.play{color:#7fb4f5}
  .ok{color:#7bd88f;padding:6px 0}
@@ -73,6 +76,10 @@ ADMIN_HTML = """<!DOCTYPE html>
 <body>
 <h1>Streamlink Gateway · 頻道管理</h1>
 %(msg)s
+<form method="post" action="/admin/restart-gateway"
+      onsubmit="return confirm('重新啟動整個 Gateway？正在播放的頻道會中斷幾秒。')">
+  <button type="submit" class="warn">重啟 Gateway</button>
+</form>
 <h2>新增頻道</h2>
 <form method="post" action="/admin/add">
   <input name="name" placeholder="ID (a-z 0-9 - _)" required pattern="[A-Za-z0-9_-]{1,32}" maxlength="32">
@@ -82,7 +89,7 @@ ADMIN_HTML = """<!DOCTYPE html>
 </form>
 <h2>頻道清單（%(count)s 台）</h2>
 <table>
-<thead><tr><th>ID</th><th>名稱</th><th>YouTube URL</th><th></th><th></th></tr></thead>
+<thead><tr><th>ID</th><th>名稱</th><th>YouTube URL</th><th></th><th></th><th></th></tr></thead>
 <tbody>
 %(rows)s
 </tbody>
@@ -206,6 +213,15 @@ class Channel:
                 pass
         self.proc = None
 
+    def restart(self):
+        with self.lock:
+            self._kill_locked()
+            if os.path.isdir(self.dir):
+                shutil.rmtree(self.dir, ignore_errors=True)
+            self._spawn_locked()
+        log("admin: restarted channel %s" % self.name)
+        return self.proc is not None
+
 
 def load_channels():
     with open(CHANNELS_FILE, "r", encoding="utf-8") as f:
@@ -265,6 +281,25 @@ class Bridge:
         log("admin: removed channel %s" % name)
         return True
 
+    def restart_channel(self, name):
+        with self.lock:
+            ch = self.channels.get(name)
+        if ch is None:
+            return False
+        return ch.restart()
+
+    def restart_gateway(self):
+        label = os.environ.get("SL_LAUNCHD_LABEL", "com.neo.iptv-streamlink")
+        sh = "sleep 1; exec launchctl kickstart -k gui/%d/%s" % (os.getuid(), label)
+        try:
+            subprocess.Popen(["sh", "-c", sh], start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            log("admin: restart-gateway spawn FAILED: %s" % e)
+            return False
+        log("admin: restart gateway scheduled via launchctl %s" % label)
+        return True
+
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "Streamlink-Gateway/1.0"
@@ -295,20 +330,33 @@ class Handler(BaseHTTPRequestHandler):
         q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         msg = ""
         if q.get("ok"):
-            msg = '<div class="ok">完成: %s</div>' % html.escape(q["ok"][0])
+            okmap = {"added": "已新增頻道", "deleted": "已刪除頻道",
+                     "restarted": "已重啟頻道串流",
+                     "restarting": "Gateway 重啟中，約幾秒後恢復"}
+            label = okmap.get(q["ok"][0], q["ok"][0])
+            msg = '<div class="ok">完成: %s</div>' % html.escape(label)
         elif q.get("err"):
-            msg = '<div class="err">失敗: %s</div>' % html.escape(q["err"][0])
+            errmap = {"exists": "頻道 ID 已存在", "invalid name": "ID 格式不正確",
+                      "invalid url": "URL 格式不正確", "notfound": "找不到頻道",
+                      "restart fail": "重啟指令送出失敗"}
+            label = errmap.get(q["err"][0], q["err"][0])
+            msg = '<div class="err">失敗: %s</div>' % html.escape(label)
         rows = []
         for c in sorted(br.channels.values(), key=lambda c: c.name):
             rows.append(
                 "<tr><td>%s</td><td>%s</td><td class='url'>%s</td>"
                 "<td><a class='play' href='/live/%s.m3u8' target='_blank'>播放</a></td>"
+                "<td><form class='inline' method='post' action='/admin/restart' "
+                "onsubmit=\"return confirm('重啟 %s 的串流？')\">"
+                "<input type='hidden' name='name' value='%s'>"
+                "<button type='submit' class='warn'>重啟</button></form></td>"
                 "<td><form class='inline' method='post' action='/admin/del' "
                 "onsubmit=\"return confirm('確定刪除 %s ?')\">"
                 "<input type='hidden' name='name' value='%s'>"
                 "<button type='submit' class='del'>刪除</button></form></td></tr>"
                 % (html.escape(c.name), html.escape(c.title),
                    html.escape(c.youtube_url), html.escape(c.name),
+                   html.escape(c.title), html.escape(c.name),
                    html.escape(c.title), html.escape(c.name)))
         return ADMIN_HTML % {"msg": msg, "count": len(br.channels),
                              "rows": "\n".join(rows)}
@@ -371,9 +419,6 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         br = self.server.bridge
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path not in ("/admin/add", "/admin/del"):
-            self._send(404, b"not found\n", "text/plain")
-            return
         try:
             length = int(self.headers.get("Content-Length", 0) or 0)
         except ValueError:
@@ -383,6 +428,10 @@ class Handler(BaseHTTPRequestHandler):
         else:
             raw = ""
         form = urllib.parse.parse_qs(raw, keep_blank_values=True)
+        if parsed.path not in ("/admin/add", "/admin/del",
+                               "/admin/restart", "/admin/restart-gateway"):
+            self._send(404, b"not found\n", "text/plain")
+            return
 
         def val(k):
             v = form.get(k)
@@ -405,6 +454,15 @@ class Handler(BaseHTTPRequestHandler):
             name = val("name")
             ok = br.remove_channel(name)
             self._send_redirect("/admin?ok=deleted" if ok else "/admin?err=notfound")
+            return
+        if parsed.path == "/admin/restart":
+            name = val("name")
+            ok = br.restart_channel(name)
+            self._send_redirect("/admin?ok=restarted" if ok else "/admin?err=notfound")
+            return
+        if parsed.path == "/admin/restart-gateway":
+            ok = br.restart_gateway()
+            self._send_redirect("/admin?ok=restarting" if ok else "/admin?err=restart+fail")
             return
 
 

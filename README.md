@@ -51,6 +51,8 @@ IPTV player / wall player
 | `/admin` | WebUI：頻道管理（新增/刪除）|
 | `POST /admin/add` | 新增頻道 (form: `name`, `title`, `youtube_url`) |
 | `POST /admin/del` | 刪除頻道 (form: `name`) |
+| `POST /admin/restart` | 重啟單一頻道串流 (form: `name`) |
+| `POST /admin/restart-gateway` | 重啟整個 gateway 服務 |
 
 ## WebUI：頻道管理（/admin）
 
@@ -59,6 +61,11 @@ IPTV player / wall player
 - **新增**：填 ID、顯示名稱、YouTube 直播網址。ID 限 `a-z 0-9 - _`、1–32 字元；
   URL 限 http(s)；ID 重複會擋。原本的額外欄位（例如舊版的 `format`）會保留，不會被弄丟。
 - **刪除**：會 kill 該頻道的 streamlink/ffmpeg 管線、清除該頻道的 HLS 暫存目錄，再更新設定檔。
+- **重啟（單一頻道）**：kill 該頻道的 streamlink/ffmpeg 管線、清暫存後立即重新拉流
+  （畫面卡住／無訊號時用），不動設定檔。
+- **重啟 Gateway**：重啟整個服務（內部用 `launchctl kickstart -k gui/<uid>/` +
+  環境變數 `SL_LAUNCHD_LABEL`，預設 `com.neo.iptv-streamlink`），正在播放的頻道
+  會中斷數秒後由 launchd 自動拉回。
 - 每次變更都以原子寫入（tmp + rename）同步 `channels.json`，runtime 與設定檔一致，立即生效；
   但**正在播放中的其他頻道不受影響**。
 
@@ -116,6 +123,7 @@ Log：`/tmp/streamlink-gateway.log`（stdout）、`/tmp/streamlink-gateway.err.l
 | `SL_FFMPEG` | `/opt/homebrew/bin/ffmpeg` | ffmpeg 路徑 |
 | `SL_HLS_ROOT` | `/tmp/streamlink-hls` | HLS segment 暫存目錄 |
 | `SL_CHANNELS` | `./channels.json` | 頻道設定檔 |
+| `SL_LAUNCHD_LABEL` | `com.neo.iptv-streamlink` | gateway 重啟用的 launchd label |
 
 ## 驗證
 
