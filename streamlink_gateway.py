@@ -113,10 +113,19 @@ class Channel:
         self.dir = os.path.join(HLS_ROOT, name)
         self.proc = None
         self.last_req = 0.0
+        self.spawned_at = 0.0
         self.lock = Lock()
 
     def _spawn_locked(self):
         os.makedirs(self.dir, exist_ok=True)
+        # 上一條管線被關掉（閒置回收 / gateway 重啟）時，ffmpeg 收尾會把 index.m3u8
+        # 寫成帶 #EXT-X-ENDLIST 的「已結束」清單。若不清掉，下次有人打開頻道時
+        # 會先端出這份死清單，播放器立刻判定串流停止（就是「停止／無串流」）。
+        for stale in os.listdir(self.dir):
+            try:
+                os.remove(os.path.join(self.dir, stale))
+            except OSError:
+                pass
         # streamlink 連續拉流(720p) | ffmpeg -c copy 切 HLS
         cmd = (
             shlex.quote(STREAMLINK) + " --stdout"
@@ -138,6 +147,7 @@ class Channel:
                 cmd, shell=True, cwd=self.dir,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True)   # 新 process group，方便整條管線一起殺
+            self.spawned_at = time.time()
             log("spawn streamlink|ffmpeg %s (%s)" % (self.name, self.title))
         except Exception as e:
             log("spawn FAILED %s: %s" % (self.name, e))
@@ -156,14 +166,21 @@ class Channel:
             return None
         path = os.path.join(self.dir, "index.m3u8")
         deadline = time.time() + 12.0         # streamlink resolve + 首段較慢
+        man = ""
         while time.time() < deadline:
-            if os.path.exists(path) and os.path.getsize(path) > 0:
+            # 只接受這條管線自己寫出來、而且還在「進行中」的清單；
+            # 帶 ENDLIST 的代表串流已結束，等下一輪再說。
+            try:
+                if os.path.getmtime(path) >= self.spawned_at:
+                    with open(path, "r", encoding="utf-8", errors="replace") as f:
+                        man = f.read()
+            except OSError:
+                man = ""
+            if man.strip() and "#EXT-X-ENDLIST" not in man:
                 break
+            man = ""
             time.sleep(0.4)
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                man = f.read()
-        except OSError:
+        if not man.strip():
             return None
         out = []
         for line in man.splitlines():

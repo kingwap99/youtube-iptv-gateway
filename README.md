@@ -135,6 +135,20 @@ curl -s http://127.0.0.1:8081/live/tvbs.m3u8 | head -8
 ffmpeg -v error -i http://127.0.0.1:8081/live/tvbs.m3u8 -t 20 -f null -
 ```
 
+## 疑難排解
+
+### 播放器顯示「停止／無串流」，manifest 尾端是 `#EXT-X-ENDLIST`
+
+ffmpeg 被關掉時（閒置 `SL_IDLE_TIMEOUT` 秒回收、gateway 重啟…）會把 `index.m3u8`
+收尾成帶 `#EXT-X-ENDLIST` 的「已結束」清單。若這份檔案留在頻道目錄裡，下次開啟
+同一台時，gateway 雖然重新 spawn 了管線，卻會先讀到這份舊清單就回給播放器，
+播放器隨即判定串流結束（停在停止／無串流，而且不會自己恢復）。
+
+現在的處理：
+
+- `_spawn_locked()` 重開管線前先清空該頻道目錄，舊的死清單沒有機會被讀到。
+- `manifest()` 只接受這條管線自己寫出、且不含 `#EXT-X-ENDLIST` 的清單，最多等 12 秒。
+
 ## 注意
 
 - 內部/個人使用，勿公開（YouTube ToS）。
