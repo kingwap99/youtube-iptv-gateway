@@ -36,6 +36,8 @@ IPTV player / wall player
 - 📦 ffmpeg `-c copy` 零重編碼，CPU ≈ 0%
 - 📋 `/iptv.m3u` 播放清單，餵給 VLC / Kodi / IPTV app / AVPlayer
 - 🎚️ `SL_STREAM` 環境變數切換 720p / 1080p
+- 🎞️ **雙解析度**：既有端點維持 720p；每台頻道另開 `<ch>-hd`（1080p/2K）第二條管線，
+  獨立 spawn／回收，互不干擾。高解析走 `/iptv-hd.m3u`
 - 🛠️ 內建 `/admin` WebUI：新增/刪除頻道，即時生效免重啟
 - 🐍 stdlib-only Python（跑在系統 python3）
 
@@ -45,7 +47,9 @@ IPTV player / wall player
 |---|---|
 | `/` | 頻道清單 |
 | `/iptv.m3u` | IPTV 播放清單（餵給播放器）|
+| `/iptv-hd.m3u` | 高解析（HD）播放清單，指向 `<ch>-hd` |
 | `/live/<ch>.m3u8` | HLS manifest（on-demand spawn）|
+| `/live/<ch>-hd.m3u8` | 高解析（1080p/2K）manifest，on-demand spawn |
 | `/live/<ch>/<seg>` | HLS segment (.ts) |
 | `/healthz` | liveness |
 | `/admin` | WebUI：頻道管理（新增/刪除）|
@@ -118,6 +122,8 @@ Log：`/tmp/streamlink-gateway.log`（stdout）、`/tmp/streamlink-gateway.err.l
 |---|---|---|
 | `SL_PORT` | `8081` | 監聽 port |
 | `SL_STREAM` | `720p,best` | 畫質（`720p,best` / `1080p,best`）|
+| `SL_STREAM_HD` | `1440p,1080p,best` | 高解析管線畫質（偏好 2K，退回 1080p）|
+| `SL_HD` | `1` | 設 `0` 關閉高解析管線（只留 720p）|
 | `SL_IDLE_TIMEOUT` | `120` | 幾秒沒人看就停 upstream |
 | `SL_STREAMLINK` | `/opt/homebrew/bin/streamlink` | streamlink 路徑 |
 | `SL_FFMPEG` | `/opt/homebrew/bin/ffmpeg` | ffmpeg 路徑 |

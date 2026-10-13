@@ -44,6 +44,11 @@ HLS_LIST_SIZE = 6       # keep ~24s of live buffer
 LIVE_EDGE = 6
 RINGBUFFER = "32M"
 STREAM = os.environ.get("SL_STREAM", "720p,best")   # 畫質切換: 720p,best / 1080p,best
+# 高解析度（HD）第二條管線：既有端點維持低解析（720p），
+# 高解析走 <name>-hd 後綴與 /iptv-hd.m3u，各自獨立 spawn，互不干擾。
+HD_SUFFIX = "-hd"
+STREAM_HD = os.environ.get("SL_STREAM_HD", "1440p,1080p,best")  # 偏好 2K，退回 1080p
+HD_ENABLED = os.environ.get("SL_HD", "1").lower() not in ("0", "false", "no")
 
 
 ADMIN_HTML = """<!DOCTYPE html>
@@ -104,12 +109,14 @@ def log(msg):
     print("[%s] %s" % (time.strftime("%H:%M:%S"), msg), flush=True)
 
 
-class Channel:
-    def __init__(self, name, title, youtube_url):
+class Pipeline:
+    # 一條 streamlink|ffmpeg 管線，綁定一個 HLS 目錄與一種解析度。
+    # name 同時是 HLS 目錄名與路由 token（低解析 "ctv"、高解析 "ctv-hd"）。
+    def __init__(self, name, youtube_url, stream, label):
         self.name = name
-        self.title = title
         self.youtube_url = youtube_url
-        self.extra = {}
+        self.stream = stream
+        self.label = label            # log 用顯示名
         self.dir = os.path.join(HLS_ROOT, name)
         self.proc = None
         self.last_req = 0.0
@@ -126,12 +133,12 @@ class Channel:
                 os.remove(os.path.join(self.dir, stale))
             except OSError:
                 pass
-        # streamlink 連續拉流(720p) | ffmpeg -c copy 切 HLS
+        # streamlink 連續拉流(%s) | ffmpeg -c copy 切 HLS
         cmd = (
             shlex.quote(STREAMLINK) + " --stdout"
             " --hls-live-edge %d" % LIVE_EDGE +
             " --ringbuffer-size %s" % RINGBUFFER +
-            " -4 --default-stream " + STREAM + " --url " + shlex.quote(self.youtube_url) +
+            " -4 --default-stream " + self.stream + " --url " + shlex.quote(self.youtube_url) +
             " | " + shlex.quote(FFMPEG) +
             " -hide_banner -loglevel error"
             " -fflags +genpts -f mpegts -i pipe:0"
@@ -148,7 +155,7 @@ class Channel:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True)   # 新 process group，方便整條管線一起殺
             self.spawned_at = time.time()
-            log("spawn streamlink|ffmpeg %s (%s)" % (self.name, self.title))
+            log("spawn streamlink|ffmpeg %s [%s]" % (self.name, self.label))
         except Exception as e:
             log("spawn FAILED %s: %s" % (self.name, e))
             self.proc = None
@@ -240,13 +247,45 @@ class Channel:
         return self.proc is not None
 
 
+class Channel:
+    # 一台頻道 = 低解析管線（既有 <name>）＋可選高解析管線（<name>-hd）。
+    # 兩條管線獨立 spawn / 回收，互不干擾；低解析維持現行行為不變。
+    def __init__(self, name, title, youtube_url, extra=None):
+        self.name = name
+        self.title = title
+        self.youtube_url = youtube_url
+        self.extra = extra or {}
+        self.sd = Pipeline(name, youtube_url, STREAM, "%s · %s" % (title, STREAM))
+        self.hd = None
+        if HD_ENABLED:
+            self.hd = Pipeline(name + HD_SUFFIX, youtube_url, STREAM_HD,
+                               "%s · %s" % (title, STREAM_HD))
+
+    @property
+    def dir(self):                 # 相容舊呼叫（刪除時清目錄）
+        return self.sd.dir
+
+    def pipelines(self):
+        return [p for p in (self.sd, self.hd) if p is not None]
+
+    def reap(self):
+        for p in self.pipelines():
+            p.reap()
+
+    def restart(self):
+        for p in self.pipelines():
+            p.restart()
+        log("admin: restarted channel %s (sd%s)" % (self.name, "+hd" if self.hd else ""))
+        return True
+
+
 def load_channels():
     with open(CHANNELS_FILE, "r", encoding="utf-8") as f:
         cfg = json.load(f)
     chans = []
     for name, c in cfg.items():
-        ch = Channel(name, c.get("title", name), c["youtube_url"])
-        ch.extra = {k: v for k, v in c.items() if k not in ("title", "youtube_url")}
+        extra = {k: v for k, v in c.items() if k not in ("title", "youtube_url")}
+        ch = Channel(name, c.get("title", name), c["youtube_url"], extra)
         chans.append(ch)
     return chans
 
@@ -291,10 +330,11 @@ class Bridge:
             if ch is None:
                 return False
             self._save()
-        with ch.lock:
-            ch._kill_locked()
-        if os.path.isdir(ch.dir):
-            shutil.rmtree(ch.dir, ignore_errors=True)
+        for p in ch.pipelines():
+            with p.lock:
+                p._kill_locked()
+            if os.path.isdir(p.dir):
+                shutil.rmtree(p.dir, ignore_errors=True)
         log("admin: removed channel %s" % name)
         return True
 
@@ -342,6 +382,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    @staticmethod
+    def _resolve_pipeline(br, token):
+        # "ctv" -> 低解析；"ctv-hd" -> 高解析（HD 關閉時回 None）。
+        if token.endswith(HD_SUFFIX):
+            ch = br.channels.get(token[:-len(HD_SUFFIX)])
+            return (ch.hd if ch and ch.hd else None)
+        ch = br.channels.get(token)
+        return ch.sd if ch else None
+
     def _admin_page(self):
         br = self.server.bridge
         q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -362,7 +411,8 @@ class Handler(BaseHTTPRequestHandler):
         for c in sorted(br.channels.values(), key=lambda c: c.name):
             rows.append(
                 "<tr><td>%s</td><td>%s</td><td class='url'>%s</td>"
-                "<td><a class='play' href='/live/%s.m3u8' target='_blank'>播放</a></td>"
+                "<td><a class='play' href='/live/%s.m3u8' target='_blank'>播放</a>"
+                "%s</td>"
                 "<td><form class='inline' method='post' action='/admin/restart' "
                 "onsubmit=\"return confirm('重啟 %s 的串流？')\">"
                 "<input type='hidden' name='name' value='%s'>"
@@ -373,6 +423,8 @@ class Handler(BaseHTTPRequestHandler):
                 "<button type='submit' class='del'>刪除</button></form></td></tr>"
                 % (html.escape(c.name), html.escape(c.title),
                    html.escape(c.youtube_url), html.escape(c.name),
+                   (' <a class="play" href="/live/%s%s.m3u8" target="_blank">HD</a>'
+                    % (html.escape(c.name), HD_SUFFIX)) if c.hd else "",
                    html.escape(c.title), html.escape(c.name),
                    html.escape(c.title), html.escape(c.name)))
         return ADMIN_HTML % {"msg": msg, "count": len(br.channels),
@@ -388,10 +440,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path in ("/", "/index"):
             rows = "".join(
-                '<li><a href="/live/%s.m3u8">%s</a> <code>/live/%s.m3u8</code></li>'
-                % (c.name, c.title, c.name) for c in br.channels.values())
+                '<li><a href="/live/%s.m3u8">%s</a> <code>/live/%s.m3u8</code>%s</li>'
+                % (c.name, c.title, c.name,
+                   (' · <a href="/live/%s%s.m3u8">%s HD</a> <code>/live/%s%s.m3u8</code>'
+                    % (c.name, HD_SUFFIX, c.title, c.name, HD_SUFFIX)) if c.hd else "")
+                for c in br.channels.values())
             body = ("<h1>Streamlink Gateway</h1><ul>%s</ul>"
-                    '<p>Playlist: <a href="/iptv.m3u">/iptv.m3u</a> · '
+                    '<p>Playlist: <a href="/iptv.m3u">/iptv.m3u</a>（720p）· '
+                    '<a href="/iptv-hd.m3u">/iptv-hd.m3u</a>（HD）· '
                     '<a href="/admin">管理頻道</a></p>' % rows).encode()
             self._send(200, body, "text/html; charset=utf-8")
             return
@@ -403,21 +459,31 @@ class Handler(BaseHTTPRequestHandler):
                 lines.append("http://%s/live/%s.m3u8" % (host, c.name))
             self._send(200, ("\n".join(lines) + "\n").encode(), "application/x-mpegurl")
             return
+        if path == "/iptv-hd.m3u":
+            host = self.headers.get("Host", "127.0.0.1:%d" % PORT)
+            lines = ["#EXTM3U"]
+            for c in br.channels.values():
+                if not c.hd:
+                    continue
+                lines.append('#EXTINF:-1 tvg-id="%s" tvg-name="%s HD",%s HD' % (c.name, c.title, c.title))
+                lines.append("http://%s/live/%s%s.m3u8" % (host, c.name, HD_SUFFIX))
+            self._send(200, ("\n".join(lines) + "\n").encode(), "application/x-mpegurl")
+            return
         if path == "/admin":
             body = self._admin_page().encode()
             self._send(200, body, "text/html; charset=utf-8")
             return
         parts = path.strip("/").split("/")
         if len(parts) >= 2 and parts[0] == "live":
-            cname = parts[1]
-            if cname.endswith(".m3u8"):
-                cname = cname[:-5]
-            ch = br.channels.get(cname)
-            if not ch:
+            token = parts[1]
+            if token.endswith(".m3u8"):
+                token = token[:-5]
+            pipe = self._resolve_pipeline(br, token)
+            if not pipe:
                 self._send(404, b"no such channel\n", "text/plain")
                 return
             if len(parts) == 2:
-                man = ch.manifest()
+                man = pipe.manifest()
                 if man is None:
                     self._send(503, b"hls not ready\n", "text/plain")
                     return
@@ -425,7 +491,7 @@ class Handler(BaseHTTPRequestHandler):
                            {"Cache-Control": "no-cache"})
                 return
             if len(parts) == 3:
-                data = ch.segment(parts[2])
+                data = pipe.segment(parts[2])
                 if data is None:
                     self._send(404, b"segment not found\n", "text/plain")
                     return
