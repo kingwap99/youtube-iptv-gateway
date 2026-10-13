@@ -293,9 +293,58 @@ def load_channels():
 class Bridge:
     def __init__(self):
         self.lock = Lock()
+        self._sweep_stale_pipelines()
         self.channels = {c.name: c for c in load_channels()}
         log("loaded %d YouTube channels" % len(self.channels))
         Thread(target=self._reaper, daemon=True).start()
+
+    def _sweep_stale_pipelines(self):
+        # gateway 結束時（crash / launchd 重啟 / 手動 kickstart）來不及收掉自己 spawn 的
+        # streamlink|ffmpeg，它們會變孤兒繼續寫同一個 HLS 目錄：和新管線搶寫，
+        # 段落編號交錯（例如 ctv 目錄同時有 seg_00070 與 seg_02290），
+        # 播放器拿到的清單指向被另一方刪掉的段落就卡住停止。
+        # 啟動時先清掉殘留管線、再清空 HLS 暫存，確保只有一條寫手。
+        marker = "seg_%05d.ts index.m3u8"
+        try:
+            out = subprocess.run(
+                ["ps", "-axo", "pid=,pgid=,command="],
+                capture_output=True, text=True, timeout=10).stdout
+        except Exception as e:
+            log("sweep: ps failed (%s) -> skip cleanup" % e)
+            return
+        pgids = set()
+        for line in out.splitlines():
+            parts = line.split(maxsplit=2)
+            if len(parts) < 3:
+                continue
+            pid, pgid, cmd = parts
+            try:
+                if int(pid) == os.getpid():
+                    continue
+                pgid_i = int(pgid)
+            except ValueError:
+                continue
+            if marker in cmd and ("/bin/sh -c" in cmd
+                                  or STREAMLINK in cmd or FFMPEG in cmd):
+                pgids.add(pgid_i)
+        if not pgids:
+            log("sweep: no stale pipelines found")
+            return
+        for gid in pgids:
+            try:
+                os.killpg(gid, signal.SIGTERM)
+            except Exception:
+                pass
+        time.sleep(1.0)
+        for gid in pgids:   # SIGKILL 兜底
+            try:
+                os.killpg(gid, signal.SIGKILL)
+            except Exception:
+                pass
+        log("sweep: killed %d stale pipeline group(s)" % len(pgids))
+        if os.path.isdir(HLS_ROOT):
+            shutil.rmtree(HLS_ROOT, ignore_errors=True)
+        log("sweep: cleared %s" % HLS_ROOT)
 
     def _reaper(self):
         while True:
@@ -561,10 +610,22 @@ def main():
     srv = QuietServer(("0.0.0.0", PORT), Handler)
     srv.bridge = br
     log("Streamlink gateway listening on 0.0.0.0:%d" % PORT)
+
+    def shutdown(signum, frame):
+        log("received signal %d -> killing channel pipelines" % signum)
+        for ch in br.channels.values():
+            for p in ch.pipelines():
+                with p.lock:
+                    p._kill_locked()
+        log("shutdown complete")
+        raise SystemExit(0)
+
+    # launchd 重啟/停止會送 SIGTERM：先收掉自家管線，免得留下孤兒和新管線搶寫。
+    signal.signal(signal.SIGTERM, shutdown)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
-        pass
+        shutdown(signal.SIGINT, None)
 
 
 if __name__ == "__main__":
